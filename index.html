@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#111"><title>Jewellery Try-On</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%;background:#111;color:#f3ede0;font-family:system-ui,sans-serif;overflow:hidden}
+button{font:inherit;color:inherit;background:#2a2620;border:1px solid #4a4230;border-radius:12px;padding:10px 14px}
+button:active{background:#3b3426}
+#home{height:100%;overflow:auto;padding:max(16px,env(safe-area-inset-top)) 16px 24px}
+h1{font-weight:500;letter-spacing:.12em;text-transform:uppercase;color:#d9b45f;text-align:center;font-size:20px;margin:8px 0 14px}
+#tabs{display:flex;gap:8px;justify-content:center;margin-bottom:14px;flex-wrap:wrap}
+#tabs button.on{background:#d9b45f;color:#111;border-color:#d9b45f}
+#grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}
+.card{background:#1d1a15;border:1px solid #3a3326;border-radius:16px;padding:12px;text-align:center}
+.card .ic{height:110px;display:flex;align-items:center;justify-content:center;font-size:54px}
+.card img{max-width:100%;max-height:110px;border-radius:8px}
+.card b{display:block;font-weight:500;margin-top:6px}.card small{color:#b9ad92}
+#tryon{position:fixed;inset:0;background:#000}
+#stage{position:absolute;left:50%;top:50%}
+#stage video,#stage canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.top{position:absolute;top:0;left:0;right:0;display:flex;gap:10px;align-items:center;padding:max(10px,env(safe-area-inset-top)) 12px 10px;background:linear-gradient(#000a,#0000)}
+#title{flex:1;font-size:16px}
+#hint{position:absolute;top:50%;left:0;right:0;text-align:center;font-size:18px;text-shadow:0 1px 6px #000;pointer-events:none}
+.bar{position:absolute;bottom:0;left:0;right:0;padding:10px 12px max(12px,env(safe-area-inset-bottom));background:linear-gradient(#0000,#000c);display:flex;flex-wrap:wrap;gap:8px;justify-content:center;align-items:center}
+.sw{width:34px;height:34px;border-radius:50%;padding:0;border:2px solid #fff6}
+#cap{width:64px;height:64px;border-radius:50%;background:#fff;border:4px solid #d9b45f;padding:0}
+#note{width:100%;text-align:center;font-size:12px;color:#d9d2c0}
+</style></head><body>
+<div id="home"><h1 id="shop"></h1><div id="tabs"></div><div id="grid"></div></div>
+<div id="tryon" hidden>
+ <div id="stage"><video playsinline muted></video><canvas id="gl"></canvas></div>
+ <div class="top"><button id="back">‹ Back</button><span id="title"></span><button id="flip">⟲ Camera</button></div>
+ <div id="hint"></div>
+ <div class="bar">
+  <div id="note"></div>
+  <button id="sm">− Size</button><button id="lg">+ Size</button>
+  <span id="sws" style="display:flex;gap:8px"></span>
+  <button id="ori">⟳ Fix angle</button>
+  <button id="cap" aria-label="Photo"></button>
+ </div>
+</div>
+
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+import {DRACOLoader} from 'three/addons/loaders/DRACOLoader.js';
+import {MeshoptDecoder} from 'three/addons/libs/meshopt_decoder.module.js';
+import {RoomEnvironment} from 'three/addons/environments/RoomEnvironment.js';
+import {FilesetResolver,HandLandmarker,FaceLandmarker,PoseLandmarker} from 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs';
+
+/* ========= EDIT THIS: your shop name and catalogue =========
+ type: 'ring' | 'pendant' | 'set'
+ file: path to the .glb (put files in the models/ folder)
+ set:  use pendant + earring (ONE earring file; the app mirrors it for the other ear)
+ optional: price, thumb (image path), size (real largest dimension in mm), orient (0-23, see "Fix angle") */
+const SHOP='Your Jewellery Shop';
+const CATALOG=[
+ {name:'Ring 1',type:'ring',file:'models/ring1.glb',price:''},
+ {name:'Pendant 1',type:'pendant',file:'models/pendant1.glb',price:''},
+ {name:'Set 1',type:'set',pendant:'models/set1_pendant.glb',earring:'models/set1_earring.glb',price:''},
+];
+const SIZE={ring:22,pendant:28,earring:16}; // default real-world size in mm (largest dimension)
+/* ============================================================ */
+
+const MP='https://storage.googleapis.com/mediapipe-models/';
+const MODELS={hand:MP+'hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',face:MP+'face_landmarker/face_landmarker/float16/1/face_landmarker.task',pose:MP+'pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task'};
+const METALS=[['Original',null,'conic-gradient(#e6b85c,#e8e8ef,#e0a38a,#e6b85c)'],['Gold','#e6b85c','#e6b85c'],['Rose','#e0a38a','#e0a38a'],['Silver','#e8e8ef','#e8e8ef']];
+const V=(x=0,y=0,z=0)=>new THREE.Vector3(x,y,z);
+const $=s=>document.querySelector(s);
+const video=$('video'),stage=$('#stage'),hint=$('#hint');
+
+// 24 right-handed axis orientations for the "Fix angle" button
+const ORI=[];for(const p of [[0,1,2],[0,2,1],[1,0,2],[1,2,0],[2,0,1],[2,1,0]])for(let s=0;s<8;s++){const e=new Array(16).fill(0);e[15]=1;for(let i=0;i<3;i++)e[i*4+p[i]]=s>>i&1?-1:1;const m=new THREE.Matrix4().set(...e);if(m.determinant()>0)ORI.push(m)}
+
+const renderer=new THREE.WebGLRenderer({canvas:$('#gl'),alpha:true,antialias:true,preserveDrawingBuffer:true});
+renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.toneMapping=THREE.ACESFilmicToneMapping;
+const scene=new THREE.Scene();
+scene.environment=new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(),.03).texture;
+const dl=new THREE.DirectionalLight(0xffffff,1.2);dl.position.set(200,400,600);scene.add(dl);
+const camera=new THREE.OrthographicCamera(0,1,1,0,1,3000);camera.position.z=1000;
+
+const loader=new GLTFLoader().setDRACOLoader(new DRACOLoader().setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/')).setMeshoptDecoder(MeshoptDecoder);
+const cache={};const load=u=>cache[u]??=loader.loadAsync(u).then(g=>g.scene);
+
+let W=1,H=1,facing='user',stream,cur,oi=0,us=1,metal=0,anchors=[],A={},LM={},vision,last=-1,fr=0,wake;
+const P=l=>V(l.x*W,(1-l.y)*H,-l.z*W);
+const basis=(x,y)=>{x=x.clone().normalize();y=y.clone().addScaledVector(x,-y.dot(x)).normalize();return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(x,y,V().crossVectors(x,y)))};
+
+// ---------- tracking maths ----------
+function hand(L){const p=L.map(P),a=p[14].clone().sub(p[13]).normalize();
+ let n=p[5].clone().sub(p[0]).cross(p[17].clone().sub(p[0]));if(n.z<0)n.negate();n.addScaledVector(a,-n.dot(a)).normalize();
+ const q=new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(V().crossVectors(a,n),a,n));
+ return{p:p[13].clone().lerp(p[14],.45),q,s:p[5].distanceTo(p[17])/65*us}}
+function pend(L){const a=P(L[11]),b=P(L[12]),v=a.clone().sub(b);if(v.x<0)v.negate();v.z*=.6;const sw=v.length(),q=basis(v,V(0,1,0));
+ const m=a.add(b).multiplyScalar(.5).addScaledVector(V(0,-1,0).applyQuaternion(q),sw*.06);m.z+=20;return{p:m,q,s:sw/380*us}}
+function ears(L){const r=P(L[234]),l=P(L[454]),X=l.clone().sub(r),fw=X.length(),q=basis(X,P(L[10]).sub(P(L[152])));
+ const dn=V(0,-1,0).applyQuaternion(q),sd=V(1,0,0).applyQuaternion(q),dz=(l.z-r.z)/fw;
+ const mk=(pt,g,hide)=>hide?null:{p:pt.clone().addScaledVector(dn,fw*.2).addScaledVector(sd,g*fw*.03).add(V(0,0,-fw*.1)),q,s:fw/140*us};
+ return[mk(r,-1,dz>.3),mk(l,1,dz<-.3)]}
+function put(a,t){if(!a)return;if(!t){a.visible=false;a.seen=false;return}
+ if(!a.seen){a.position.copy(t.p);a.quaternion.copy(t.q);a.scale.setScalar(t.s);a.seen=true}
+ else{a.position.lerp(t.p,.5);a.quaternion.slerp(t.q,.5);a.scale.setScalar(a.scale.x+(t.s-a.scale.x)*.5)}a.visible=true}
+
+// ---------- models ----------
+function wrap(src,type,size,mir){const root=src.clone(true),g=new THREE.Group();g.add(root);
+ const q=new THREE.Quaternion().setFromRotationMatrix(ORI[oi]);
+ if(type==='ring'){const b=new THREE.Box3().setFromObject(src).getSize(V()),a=b.x<=b.y&&b.x<=b.z?0:b.y<=b.z?1:2;
+  q.multiply(new THREE.Quaternion().setFromAxisAngle(a==0?V(0,0,1):V(1,0,0),a==0?Math.PI/2:a==2?-Math.PI/2:0))}
+ root.quaternion.copy(q);g.updateMatrixWorld(true);
+ const bx=new THREE.Box3().setFromObject(g),s=bx.getSize(V());root.position.copy(bx.getCenter(V())).negate();
+ if(type!=='ring')root.position.y-=s.y/2; // hang from the top
+ g.scale.setScalar(size/Math.max(s.x,s.y,s.z));const w=new THREE.Group();w.add(g);w.scale.x=mir;return w}
+function mount(){anchors.forEach(a=>scene.remove(a));anchors=[];A={};
+ const mk=(src,type,size,mir=1)=>{const a=new THREE.Group();a.add(wrap(src,type,size,mir));a.visible=false;scene.add(a);anchors.push(a);return a};
+ const c=cur,G=c.g;
+ if(c.type==='ring')A.ring=mk(G.main,'ring',c.size||SIZE.ring);
+ if(c.type==='pendant')A.pend=mk(G.main,'pendant',c.size||SIZE.pendant);
+ if(c.type==='set'){A.pend=mk(G.p,'pendant',c.size||SIZE.pendant);A.e0=mk(G.e,'earring',c.earringSize||SIZE.earring);A.e1=mk(G.e,'earring',c.earringSize||SIZE.earring,-1)}
+ tint();note()}
+function tint(){const col=METALS[metal][1];scene.traverse(o=>{if(!o.isMesh)return;(Array.isArray(o.material)?o.material:[o.material]).forEach(m=>{
+ if(!m.color||!(m.metalness>.5))return;m.userData.c0??=m.color.clone();col?m.color.set(col):m.color.copy(m.userData.c0)})})}
+const note=()=>$('#note').textContent=`Angle ${oi+1}/24 — if it looks right, add orient:${oi} to this item in index.html`;
+
+// ---------- landmarkers ----------
+async function lm(k){if(LM[k])return LM[k];vision??=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+ const o={baseOptions:{modelAssetPath:MODELS[k],delegate:'GPU'},runningMode:'VIDEO'};
+ return LM[k]=await(k=='hand'?HandLandmarker.createFromOptions(vision,{...o,numHands:1}):k=='face'?FaceLandmarker.createFromOptions(vision,{...o,numFaces:1}):PoseLandmarker.createFromOptions(vision,o))}
+
+// ---------- camera / layout ----------
+async function cam(){stream?.getTracks().forEach(t=>t.stop());
+ stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720}},audio:false});
+ video.srcObject=stream;await video.play();layout();anchors.forEach(a=>a.seen=false)}
+function layout(){const vw=video.videoWidth||1280,vh=video.videoHeight||720,k=Math.max(innerWidth/vw,innerHeight/vh);W=vw*k;H=vh*k;
+ Object.assign(stage.style,{width:W+'px',height:H+'px',marginLeft:-W/2+'px',marginTop:-H/2+'px',transform:facing==='user'?'scaleX(-1)':''});
+ renderer.setSize(W,H);Object.assign(camera,{right:W,top:H});camera.updateProjectionMatrix()}
+addEventListener('resize',()=>cur&&layout());
+
+// ---------- loop ----------
+function loop(){if(!cur)return;requestAnimationFrame(loop);
+ if(video.readyState>=2&&video.currentTime!==last){last=video.currentTime;fr++;const t=performance.now();
+  try{
+   if(cur.type==='ring'&&LM.hand){const r=LM.hand.detectForVideo(video,t).landmarks[0];put(A.ring,r&&hand(r))}
+   if(cur.type!=='ring'){
+    if((cur.type==='pendant'||fr%2)&&LM.pose){const r=LM.pose.detectForVideo(video,t).landmarks[0];put(A.pend,r&&r[11].visibility>.5&&r[12].visibility>.5?pend(r):null)}
+    if(cur.type==='set'&&!(fr%2)&&LM.face){const r=LM.face.detectForVideo(video,t).faceLandmarks[0],e=r?ears(r):[null,null];put(A.e0,e[0]);put(A.e1,e[1])}
+   }
+  }catch(e){}
+  hint.textContent=anchors.some(a=>a.visible)?'':cur.type==='ring'?'Show your hand to the camera':cur.type==='pendant'?'Step back to show your shoulders':'Look at the camera'}
+ renderer.render(scene,camera)}
+
+// ---------- screens ----------
+async function open(item){cur=null;$('#home').hidden=true;$('#tryon').hidden=false;$('#title').textContent=item.name;hint.textContent='Loading…';
+ oi=item.orient||0;us=1;
+ try{
+  item={...item};item.g=item.type==='set'?{p:await load(item.pendant),e:await load(item.earring)}:{main:await load(item.file)};
+  mount();cur=item;
+  await cam();
+  for(const k of item.type==='ring'?['hand']:item.type==='pendant'?['pose']:['pose','face'])await lm(k);
+  wake=await navigator.wakeLock?.request('screen').catch(()=>{});
+  loop();
+ }catch(e){hint.textContent='Could not start: '+(e.message||e)+' (check camera permission and model file names)'}}
+function home(){cur=null;stream?.getTracks().forEach(t=>t.stop());wake?.release?.();anchors.forEach(a=>scene.remove(a));anchors=[];$('#tryon').hidden=true;$('#home').hidden=false}
+$('#back').onclick=home;
+$('#flip').onclick=()=>{facing=facing==='user'?'environment':'user';cam()};
+$('#sm').onclick=()=>us=Math.max(.5,us-.05);$('#lg').onclick=()=>us=Math.min(2,us+.05);
+$('#ori').onclick=()=>{oi=(oi+1)%24;mount()};
+$('#sws').append(...METALS.map(([n,,bg],i)=>Object.assign(document.createElement('button'),{className:'sw',title:n,style:'background:'+bg,onclick:()=>{metal=i;tint()}})));
+$('#cap').onclick=()=>{const c=document.createElement('canvas');c.width=W;c.height=H;const x=c.getContext('2d');
+ if(facing==='user'){x.translate(W,0);x.scale(-1,1)}x.drawImage(video,0,0,W,H);renderer.render(scene,camera);x.drawImage(renderer.domElement,0,0,W,H);
+ c.toBlob(async b=>{const f=new File([b],'tryon.png',{type:'image/png'});
+  if(navigator.canShare?.({files:[f]}))await navigator.share({files:[f],title:cur.name}).catch(()=>{});
+  else{const a=document.createElement('a');a.href=URL.createObjectURL(b);a.download='tryon.png';a.click()}})};
+
+// home screen
+$('#shop').textContent=SHOP;
+const TABS=[['All',null],['Rings','ring'],['Pendants','pendant'],['Sets','set']],ICON={ring:'💍',pendant:'📿',set:'✨'};
+function render(f){$('#tabs').replaceChildren(...TABS.map(([n,t])=>Object.assign(document.createElement('button'),{textContent:n,className:t===f?'on':'',onclick:()=>render(t)})));
+ $('#grid').replaceChildren(...CATALOG.filter(i=>!f||i.type===f).map(i=>{const d=document.createElement('div');d.className='card';
+  d.innerHTML=`<div class="ic">${i.thumb?`<img src="${i.thumb}" alt="">`:ICON[i.type]}</div><b></b><small></small>`;
+  d.querySelector('b').textContent=i.name;d.querySelector('small').textContent=i.price||'';d.onclick=()=>open(i);return d}))}
+render(null);
+</script></body></html>
